@@ -180,6 +180,9 @@ var (
 		utils.RPCGlobalEVMTimeoutFlag,
 		utils.RPCGlobalTxFeeCapFlag,
 		utils.AllowUnprotectedTxs,
+		utils.BxAPIEndpointsFlag,
+		utils.BxAPIAuthHeaderFlag,
+		utils.BxAPIAllowInsecureFlag,
 	}
 
 	metricsFlags = []cli.Flag{

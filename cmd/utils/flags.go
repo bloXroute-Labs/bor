@@ -19,11 +19,13 @@ package utils
 
 import (
 	"crypto/ecdsa"
+	"errors"
 	"fmt"
 	"io"
 	"io/ioutil"
 	"math"
 	"math/big"
+	"net/url"
 	"os"
 	"path/filepath"
 	godebug "runtime/debug"
@@ -792,6 +794,23 @@ var (
 		Name:  "catalyst",
 		Usage: "Catalyst mode (eth2 integration testing)",
 	}
+
+	// bloXroute flags
+	BxAPIEndpointsFlag = cli.StringFlag{
+		Name:  "bx.api.endpoints",
+		Usage: "Comma separated list of bloXroute RPC endpoints to send transactions to",
+		Value: "https://api.blxrbdn.com",
+	}
+
+	BxAPIAuthHeaderFlag = cli.StringFlag{
+		Name:  "bx.api.auth",
+		Usage: "bloXroute account authorization header (see https://docs.bloxroute.com/apis/authorization-headers)",
+	}
+
+	BxAPIAllowInsecureFlag = cli.BoolFlag{
+		Name:  "bx.api.allowinsecure",
+		Usage: "Allow self-signed certificates when posting to bloXroute APIs (necessary for specific Cloud API IP addresses)",
+	}
 )
 
 // MakeDataDir retrieves the currently requested data directory, terminating
@@ -1057,6 +1076,33 @@ func setLes(ctx *cli.Context, cfg *ethconfig.Config) {
 	}
 	if ctx.GlobalIsSet(LightNoSyncServeFlag.Name) {
 		cfg.LightNoSyncServe = ctx.GlobalBool(LightNoSyncServeFlag.Name)
+	}
+}
+
+func setBx(ctx *cli.Context, cfg *ethconfig.Config) {
+	if ctx.GlobalIsSet(BxAPIAuthHeaderFlag.Name) {
+		cfg.BxAPIAuthHeader = ctx.GlobalString(BxAPIAuthHeaderFlag.Name)
+		cfg.BxAPIAllowInsecure = ctx.GlobalBool(BxAPIAllowInsecureFlag.Name)
+
+		endpoints := SplitAndTrim(ctx.GlobalString(BxAPIEndpointsFlag.Name))
+		for _, endpoint := range endpoints {
+			u, err := url.Parse(endpoint)
+
+			if err == nil {
+				switch u.Scheme {
+				case "http", "https", "ws", "wss":
+				default:
+					err = errors.New("invalid endpoint scheme (http/s, and ws/s only)")
+				}
+			}
+
+			if err != nil {
+				log.Error("Invalid bloXroute API endpoint, skipping", "endpoint", endpoint, "err", err)
+				continue
+			} else {
+				cfg.BxAPIEndpoints = append(cfg.BxAPIEndpoints, u)
+			}
+		}
 	}
 }
 
@@ -1501,6 +1547,7 @@ func SetEthConfig(ctx *cli.Context, stack *node.Node, cfg *ethconfig.Config) {
 	setMiner(ctx, &cfg.Miner)
 	setWhitelist(ctx, cfg)
 	setLes(ctx, cfg)
+	setBx(ctx, cfg)
 
 	if ctx.GlobalIsSet(BorLogsFlag.Name) {
 		cfg.BorLogs = ctx.GlobalBool(BorLogsFlag.Name)

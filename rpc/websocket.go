@@ -60,7 +60,7 @@ func (s *Server) WebsocketHandler(allowedOrigins []string) http.Handler {
 			log.Debug("WebSocket upgrade failed", "err", err)
 			return
 		}
-		codec := newWebsocketCodec(conn)
+		codec := newWebsocketCodec(conn, r.Host, r.Header)
 		s.ServeCodec(codec, 0)
 	})
 }
@@ -181,15 +181,13 @@ func parseOriginURL(origin string) (string, string, string, error) {
 	return scheme, hostname, port, nil
 }
 
-// DialWebsocketWithDialer creates a new RPC client that communicates with a JSON-RPC server
-// that is listening on the given endpoint using the provided dialer.
-func DialWebsocketWithDialer(ctx context.Context, endpoint, origin string, dialer websocket.Dialer) (*Client, error) {
-	endpoint, header, err := wsClientHeaders(endpoint, origin)
+func DialWebsocketWithDialerHeaders(ctx context.Context, endpoint, origin string, dialer websocket.Dialer, headers http.Header) (*Client, error) {
+	endpoint, _, err := wsClientHeaders(endpoint, origin)
 	if err != nil {
 		return nil, err
 	}
 	return newClient(ctx, func(ctx context.Context) (ServerCodec, error) {
-		conn, resp, err := dialer.DialContext(ctx, endpoint, header)
+		conn, resp, err := dialer.DialContext(ctx, endpoint, headers)
 		if err != nil {
 			hErr := wsHandshakeError{err: err}
 			if resp != nil {
@@ -197,8 +195,18 @@ func DialWebsocketWithDialer(ctx context.Context, endpoint, origin string, diale
 			}
 			return nil, hErr
 		}
-		return newWebsocketCodec(conn), nil
+		return newWebsocketCodec(conn, endpoint, headers), nil
 	})
+}
+
+// DialWebsocketWithDialer creates a new RPC client that communicates with a JSON-RPC server
+// that is listening on the given endpoint using the provided dialer.
+func DialWebsocketWithDialer(ctx context.Context, endpoint, origin string, dialer websocket.Dialer) (*Client, error) {
+	endpoint, header, err := wsClientHeaders(endpoint, origin)
+	if err != nil {
+		return nil, err
+	}
+	return DialWebsocketWithDialerHeaders(ctx, endpoint, origin, dialer, header)
 }
 
 // DialWebsocket creates a new RPC client that communicates with a JSON-RPC server
@@ -207,12 +215,16 @@ func DialWebsocketWithDialer(ctx context.Context, endpoint, origin string, diale
 // The context is used for the initial connection establishment. It does not
 // affect subsequent interactions with the client.
 func DialWebsocket(ctx context.Context, endpoint, origin string) (*Client, error) {
-	dialer := websocket.Dialer{
+	return DialWebsocketWithDialer(ctx, endpoint, origin, WebsocketDialer())
+}
+
+// WebsocketDialer allocates a dialer with default buffer parameters set.
+func WebsocketDialer() websocket.Dialer {
+	return websocket.Dialer{
 		ReadBufferSize:  wsReadBuffer,
 		WriteBufferSize: wsWriteBuffer,
 		WriteBufferPool: wsBufferPool,
 	}
-	return DialWebsocketWithDialer(ctx, endpoint, origin, dialer)
 }
 
 func wsClientHeaders(endpoint, origin string) (string, http.Header, error) {
@@ -235,12 +247,13 @@ func wsClientHeaders(endpoint, origin string) (string, http.Header, error) {
 type websocketCodec struct {
 	*jsonCodec
 	conn *websocket.Conn
+	info PeerInfo
 
 	wg        sync.WaitGroup
 	pingReset chan struct{}
 }
 
-func newWebsocketCodec(conn *websocket.Conn) ServerCodec {
+func newWebsocketCodec(conn *websocket.Conn, host string, req http.Header) ServerCodec {
 	conn.SetReadLimit(wsMessageSizeLimit)
 	conn.SetPongHandler(func(appData string) error {
 		conn.SetReadDeadline(time.Time{})
@@ -250,7 +263,16 @@ func newWebsocketCodec(conn *websocket.Conn) ServerCodec {
 		jsonCodec: NewFuncCodec(conn, conn.WriteJSON, conn.ReadJSON).(*jsonCodec),
 		conn:      conn,
 		pingReset: make(chan struct{}, 1),
+		info: PeerInfo{
+			Transport:  "ws",
+			RemoteAddr: conn.RemoteAddr().String(),
+		},
 	}
+	// Fill in connection details.
+	wc.info.HTTP.Host = host
+	wc.info.HTTP.Origin = req.Get("Origin")
+	wc.info.HTTP.UserAgent = req.Get("User-Agent")
+	// Start pinger.
 	wc.wg.Add(1)
 	go wc.pingLoop()
 	return wc
@@ -259,6 +281,10 @@ func newWebsocketCodec(conn *websocket.Conn) ServerCodec {
 func (wc *websocketCodec) close() {
 	wc.jsonCodec.close()
 	wc.wg.Wait()
+}
+
+func (wc *websocketCodec) peerInfo() PeerInfo {
+	return wc.info
 }
 
 func (wc *websocketCodec) writeJSON(ctx context.Context, v interface{}) error {
